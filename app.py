@@ -11,6 +11,7 @@ import io
 import re
 import subprocess
 import tempfile
+import urllib.parse
 from datetime import date, timedelta
 
 import pandas as pd
@@ -152,19 +153,31 @@ def extract_test_highlights_from_page(page, x_split=195, y_tol=3.0):
     out_lines = []
     for _, lw in lines:
         lw_sorted = sorted(lw, key=lambda w: w["x0"])
-        text = " ".join(w["text"] for w in lw_sorted)
+        text = " ".join(w["text"] for w in lw_sorted).strip()
         compact = re.sub(r"\s+", "", text)
         if not started:
             if "TestHighlights" in compact.replace(":", ""):
-                # 같은 줄에 제목 뒤로 내용이 더 있으면 잘라서 시작
-                m = re.search(r"Highlights\s*:?\s*(.*)", text)
                 started = True
-                if m and m.group(1).strip():
-                    out_lines.append(m.group(1).strip())
+                # 제목과 같은 줄에 내용이 더 있는 경우가 있는데, 그게 실제 불릿 항목일 때만 포함
+                # (제목 뒤에 모델명만 덧붙는 경우 — 예: "Test Highlights: CUVIA" — 는 제외)
+                m = re.search(r"Highlights\s*:?\s*(.*)", text)
+                if m:
+                    trailing = m.group(1).strip()
+                    if trailing and re.match(r"^[•ŸlL▪∎⚫\-]", trailing):
+                        out_lines.append(trailing)
             continue
-        if compact in {"개요", "시험목적", "시험환경", "시험방법", "시험절차", "시험결과"}:
+        # '개요'/'시험환경' 등 다음 섹션 헤딩이 다른 단어와 같은 줄로 묶인 경우까지 감지
+        if re.match(r"^(개\s*요|시험\s*목적|시험\s*환경|시험\s*방법|시험\s*절차|시험\s*결과)\b", text):
             break
-        out_lines.append(text.strip())
+        out_lines.append(text)
+
+    # 좌표 기준 줄 재구성 특성상, 하이라이트 박스 바로 아래 '개요' 본문 문장이 뒤섞여
+    # 하이라이트 마지막 줄보다 위쪽(작은 top)으로 잘못 정렬되는 경우가 있음.
+    # 실제 하이라이트 항목은 항상 불릿(-, •, l 등)으로 시작하므로, 끝에서부터
+    # 불릿 없이 온전한 문장으로 끝나는('~다.') 줄은 '개요' 본문으로 간주하고 제거.
+    while out_lines and not re.match(r"^[•ŸlL▪∎⚫\-]", out_lines[-1]) and re.search(r"[가-힣]다\.\s*$", out_lines[-1]):
+        out_lines.pop()
+
     return "\n".join(l for l in out_lines if l)
 
 
@@ -226,11 +239,16 @@ def extract_summary_fields(file_bytes, filename):
         page = pdf.pages[0]
         text = page.extract_text() or ""
         highlights = extract_test_highlights_from_page(page)
+        # 제조자/제조국가 등은 표지가 아니라 2페이지 'IUT 세부사양' 표에만 있는 경우가 있어
+        # (예: 스마트시티 통합플랫폼/데이터허브 양식) 라벨 검색 대상 텍스트에 2페이지도 포함시킨다.
+        search_text = text
+        if len(pdf.pages) > 1:
+            search_text += "\n" + (pdf.pages[1].extract_text() or "")
 
     result = {"__파일명": filename}
 
     # 제조자/제조국가가 한 줄로 붙어 있는 경우 우선 탐지
-    combined_val, is_combined = _search_value(text, LABEL_PATTERNS["제조자"], combined_with="제조국가")
+    combined_val, is_combined = _search_value(search_text, LABEL_PATTERNS["제조자"], combined_with="제조국가")
     manu, country = None, None
     if is_combined and combined_val:
         # "에이엠(주)/대한민국" 또는 "에이엠(주) / 대한민국" 둘 다 처리
@@ -239,9 +257,9 @@ def extract_summary_fields(file_bytes, filename):
             manu, country = parts[0].strip(), parts[1].strip()
 
     if manu is None:
-        manu, _ = _search_value(text, LABEL_PATTERNS["제조자"])
+        manu, _ = _search_value(search_text, LABEL_PATTERNS["제조자"])
     if country is None:
-        country, _ = _search_value(text, LABEL_PATTERNS["제조국가"])
+        country, _ = _search_value(search_text, LABEL_PATTERNS["제조국가"])
 
     company, _ = _search_value(text, LABEL_PATTERNS["업체명"])
     if manu is None:
@@ -250,7 +268,7 @@ def extract_summary_fields(file_bytes, filename):
     cert_no, _ = _search_value(text, LABEL_PATTERNS["인증번호"])
     cert_date, _ = _search_value(text, LABEL_PATTERNS["인증연월일"])
     criteria, _ = _search_value(text, LABEL_PATTERNS["인증기준"])
-    scope, _ = _search_value(text, LABEL_PATTERNS["인증범위"])
+    scope, _ = _search_value(search_text, LABEL_PATTERNS["인증범위"])
     product_name, model_name, derived_model = extract_product_model_from_title(text, company_hint=company)
 
     # 시험번호 (문서 상단 "No. TTA-26-XXXXX-TS00")
@@ -573,6 +591,10 @@ if summary_files:
                 "인증기준": 인증기준,
                 "인증범위": scope,
                 "Test_Highlights": extracted.get("Test_Highlights"),
+                "영문명_검색": (
+                    "https://www.google.com/search?q="
+                    + urllib.parse.quote(f"{업체명_국문} official English name")
+                ) if 업체명_국문 else None,
             }
         )
 
@@ -582,12 +604,24 @@ if summary_files:
 
     st.write("") 
     st.subheader("인증 정보 추출 결과 (직접 수정 가능)")
-    edited_df = st.data_editor(result_df, use_container_width=True, num_rows="dynamic", height=500)
+    st.caption("🔍 영문명_검색 열을 누르면 구글 검색이 새 탭에서 열립니다. "
+               "검색 결과로 나온 영문 회사명이 맞는지 직접 확인한 뒤 업체명_영문 칸에 붙여넣어 주세요 "
+               "(자동으로 대신 채워주지 않는 이유: 회사명은 인증서에 그대로 들어가는 값이라 확인 없이 자동 반영하면 위험해서요).")
+    edited_df = st.data_editor(
+        result_df,
+        use_container_width=True,
+        num_rows="dynamic",
+        height=500,
+        column_config={
+            "영문명_검색": st.column_config.LinkColumn("영문명 검색", display_text="🔍 구글 검색"),
+        },
+    )
 
     # 엑셀 다운로드 (헤더 색상 + 열 너비/행 높이 자동 맞춤 + 줄바꿈 서식)
+    export_df = edited_df.drop(columns=["영문명_검색"], errors="ignore")
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        edited_df.to_excel(writer, index=False, sheet_name="인증서데이터")
+        export_df.to_excel(writer, index=False, sheet_name="인증서데이터")
         ws = writer.sheets["인증서데이터"]
 
         from openpyxl.styles import Alignment, Font, PatternFill
@@ -605,7 +639,7 @@ if summary_files:
             cell.fill = header_fill
             cell.alignment = header_align
 
-        autosize_worksheet(ws, edited_df)
+        autosize_worksheet(ws, export_df)
         ws.freeze_panes = "A2"
 
     st.download_button(
