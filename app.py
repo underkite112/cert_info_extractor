@@ -12,7 +12,6 @@ import os
 import re
 import subprocess
 import tempfile
-import urllib.parse
 from datetime import date, timedelta
 
 import pandas as pd
@@ -26,11 +25,10 @@ st.write("")
 
 st.markdown(
     """
-    1. **시험결과요약서 PDF**를 업로드 (여러 개 가능, 표지에서 자동으로 필드를 추출)
-    2. 인터넷전화(MMoIP) 인증 건은 **인증심의위원회 회의록(.hwp)** 도 업로드 (인증범위 및 제조국가를 회의록에서 가져옴)
-    3. **업체명 영문명 매핑 엑셀**을 업로드하면 거기 있는 업체는 자동으로 채워지고, 없으면 구글 검색 링크로 직접 확인
+    1. **업체명 영문명 리스트 엑셀**을 업로드 (업체명_국문 / 업체명_영문 두 컬럼짜리 엑셀)
+    2. **시험결과요약서 PDF**를 업로드 (여러 개 가능, 표지에서 자동으로 필드를 추출)
+    3. 인터넷전화(MMoIP) 인증 건은 **인증심의위원회 회의록(.hwp)** 도 업로드 (인증범위 및 제조국가를 회의록에서 가져옴)
     4. 인증 정보 추출 결과 표를 화면에서 확인 및 수정한 뒤 엑셀로 다운로드
-    5. 새로 채운 영문명이 있으면 화면 아래에서 **업데이트된 매핑 엑셀을 다운로드**해서 보관해뒀다가, 다음번에 ③번에 다시 업로드
     """
 )
 
@@ -53,26 +51,26 @@ with top_right:
 
 col1, col2, col3 = st.columns(3)
 with col1:
+    company_map_file = st.file_uploader(
+        "① 업체명 영문명 리스트 (.xlsx) :red[*]",
+        type=["xlsx"],
+        key=f"companymap_{st.session_state.uploader_key}",
+    )
+with col2:
     summary_files = st.file_uploader(
-        "① 시험결과요약서 (.PDF, 여러 개) :red[*]",
+        "② 시험결과요약서 (.PDF, 여러 개) :red[*]",
         type=["pdf"],
         accept_multiple_files=True,
         key=f"summary_{st.session_state.uploader_key}",
     )
-with col2:
+with col3:
     minutes_file = st.file_uploader(
-        "② 회의록 (.hwp, 선택)",
+        "③ 회의록 (.hwp, 선택)",
         type=["hwp"],
         key=f"minutes_{st.session_state.uploader_key}",
     )
-with col3:
-    company_map_file = st.file_uploader(
-        "③ 업체명 영문명 매핑 (.xlsx, 선택)",
-        type=["xlsx"],
-        key=f"companymap_{st.session_state.uploader_key}",
-    )
 
-st.caption(":red[*] 표시된 항목은 필수 업로드입니다. (회의록·매핑 엑셀은 선택 항목입니다)")
+st.caption(":red[*] 표시된 항목은 필수 업로드입니다. (회의록은 MMoIP 인증범위 보완용 선택 항목입니다)")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -319,53 +317,51 @@ def extract_minutes_table(file_bytes):
 COUNTRY_EN_MAP = {
     # 정식 영문 국가명 (Official Name) 기준
     "대한민국": "Republic of Korea",
-    "한국": "Republic of Korea",
-    "북한": "Democratic People's Republic of Korea",
     "일본": "Japan",
     "중국": "China",
     "대만": "Taiwan",
     "홍콩": "Hong Kong",
     "미국": "United States of America",
     "캐나다": "Canada",
-    "멕시코": "United Mexican States",
-    "브라질": "Federative Republic of Brazil",
-    "아르헨티나": "Argentine Republic",
+    "멕시코": "Mexico",
+    "브라질": "Brazil",
+    "아르헨티나": "Argentina",
     "독일": "Germany",
     "영국": "United Kingdom",
-    "프랑스": "French Republic",
-    "이탈리아": "Italian Republic",
+    "프랑스": "France",
+    "이탈리아": "Italy",
     "스페인": "Kingdom of Spain",
-    "포르투갈": "Portuguese Republic",
-    "네덜란드": "Kingdom of the Netherlands",
-    "벨기에": "Kingdom of Belgium",
-    "스웨덴": "Kingdom of Sweden",
-    "노르웨이": "Kingdom of Norway",
-    "덴마크": "Kingdom of Denmark",
-    "핀란드": "Republic of Finland",
-    "스위스": "Swiss Confederation",
-    "오스트리아": "Republic of Austria",
-    "그리스": "Hellenic Republic",
+    "포르투갈": "Portugal",
+    "네덜란드": "The Netherlands",
+    "벨기에": "Belgium",
+    "스웨덴": "Sweden",
+    "노르웨이": "Norway",
+    "덴마크": "Denmark",
+    "핀란드": "Finland",
+    "스위스": "Switzerland",
+    "오스트리아": "Austria",
+    "그리스": "Greece",
     "폴란드": "Republic of Poland",
-    "체코": "Czech Republic",
+    "체코": "Czechina",
     "헝가리": "Hungary",
     "아일랜드": "Ireland",
     "러시아": "Russian Federation",
-    "호주": "Commonwealth of Australia",
+    "호주": "Australia",
     "뉴질랜드": "New Zealand",
-    "인도": "Republic of India",
-    "싱가포르": "Republic of Singapore",
+    "인도": "India",
+    "싱가포르": "Singapore",
     "말레이시아": "Malaysia",
     "태국": "Kingdom of Thailand",
     "베트남": "Socialist Republic of Vietnam",
     "인도네시아": "Republic of Indonesia",
     "필리핀": "Republic of the Philippines",
     "이스라엘": "State of Israel",
-    "터키": "Republic of Türkiye",
+    "터키": "Türkiye",
     "튀르키예": "Republic of Türkiye",
     "사우디아라비아": "Kingdom of Saudi Arabia",
     "아랍에미리트": "United Arab Emirates",
     "남아프리카공화국": "Republic of South Africa",
-    "이집트": "Arab Republic of Egypt",
+    "이집트": "Egypt",
 }
 
 
@@ -530,10 +526,10 @@ def get_english_name_from_map(company_map, company_kr):
 
 # ──────────────────────────────────────────────────────────────
 # 메인 처리
-# 시험결과요약서에서 추출한 값으로 채우고, 업체명 영문명은 company_english_names.json
-# 매핑 파일에 있으면 그걸로 보완합니다 (없으면 화면에서 검색 링크로 확인 후 직접 입력).
+# 시험결과요약서에서 추출한 값으로 채우고, 업체명 영문명은 업로드한 리스트(.xlsx)에
+# 있는 것만 그대로 사용합니다 (리스트에 없으면 빈 칸).
 # ──────────────────────────────────────────────────────────────
-if summary_files:
+if summary_files and company_map_file:
     company_map = load_company_map(company_map_file)
 
     with st.expander("회의록 표 미리보기 (MMoIP 인증범위 참고용)"):
@@ -613,10 +609,6 @@ if summary_files:
                 "인증기준": 인증기준,
                 "인증범위": scope,
                 "Test_Highlights": extracted.get("Test_Highlights"),
-                "영문명_검색": (
-                    "https://www.google.com/search?q="
-                    + urllib.parse.quote(f"{업체명_국문} official English name")
-                ) if 업체명_국문 else None,
             }
         )
 
@@ -626,21 +618,15 @@ if summary_files:
 
     st.write("") 
     st.subheader("인증 정보 추출 결과 (직접 수정 가능)")
-    st.caption("🔍 영문명_검색 열을 누르면 구글 검색이 새 탭에서 열립니다. "
-               "검색 결과로 나온 영문 회사명이 맞는지 직접 확인한 뒤 업체명_영문 칸에 붙여넣어 주세요 "
-               "(자동으로 대신 채워주지 않는 이유: 회사명은 인증서에 그대로 들어가는 값이라 확인 없이 자동 반영하면 위험해서요).")
     edited_df = st.data_editor(
         result_df,
         use_container_width=True,
         num_rows="dynamic",
         height=500,
-        column_config={
-            "영문명_검색": st.column_config.LinkColumn("영문명 검색", display_text="🔍 구글 검색"),
-        },
     )
 
     # 엑셀 다운로드 (헤더 색상 + 열 너비/행 높이 자동 맞춤 + 줄바꿈 서식)
-    export_df = edited_df.drop(columns=["영문명_검색"], errors="ignore")
+    export_df = edited_df
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         export_df.to_excel(writer, index=False, sheet_name="인증서데이터")
@@ -671,35 +657,6 @@ if summary_files:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    # 업체명 영문명 매핑 업데이트: 이번에 화면에서 채운 영문명을 기존 매핑에 합쳐서 저장.
-    # GitHub이 설정돼 있으면 버튼 한 번으로 저장소에 바로 커밋되고(Streamlit Cloud가 자동 재배포),
-    # 아니면 JSON 파일로 받아서 레포의 company_english_names.json을 교체하는 방식입니다.
-    st.divider()
-    st.subheader("📁 업체명 영문명 매핑 관리")
-    updated_map = dict(company_map)
-    for _, r in edited_df.iterrows():
-        kr, en = r.get("업체명_국문"), r.get("업체명_영문")
-        if kr and en and str(en).strip():
-            updated_map[str(kr).strip()] = str(en).strip()
-
-    new_entries = {k: v for k, v in updated_map.items() if company_map.get(k) != v}
-    if new_entries:
-        st.caption(f"이번에 새로 채워지거나 바뀐 업체명 {len(new_entries)}건이 있어요. "
-                   "아래에서 매핑 엑셀을 받아 저장해두셨다가, 다음번에 ③번에 다시 업로드하시면 자동으로 채워집니다.")
-        st.dataframe(pd.DataFrame(new_entries.items(), columns=["업체명_국문", "업체명_영문"]), use_container_width=True)
-    else:
-        st.caption("현재 매핑 기준으로 새로 추가/변경된 업체명은 없어요.")
-
-    map_buf = io.BytesIO()
-    pd.DataFrame(sorted(updated_map.items()), columns=["업체명_국문", "업체명_영문"]).to_excel(
-        map_buf, index=False, sheet_name="업체명매핑"
-    )
-    st.download_button(
-        "💾 업데이트된 매핑 엑셀 다운로드 (company_english_names.xlsx)",
-        data=map_buf.getvalue(),
-        file_name="company_english_names.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
 else:
     st.write("")
-    st.info("① 시험결과요약서를 업로드하면 인증정보가 표시됩니다.")
+    st.info("① 업체명 영문명 리스트와  ② 시험결과요약서를 모두 업로드하면 인증정보가 표시됩니다.")
