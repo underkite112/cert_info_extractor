@@ -2,12 +2,13 @@
 """
 TTA 인증서 발급용 데이터 추출기 (Streamlit)
 
-- 관리 목록(xlsx) + 시험결과요약서(PDF, 여러 개) + (선택) 회의록(hwp)을 업로드하면
-- 인증번호를 기준으로 매칭해서 인증서 제작에 필요한 필드를 표로 뽑아주고
+- 시험결과요약서(PDF, 여러 개) + (선택) 회의록(hwp)을 업로드하면
+- 표지 정보를 추출해서 인증서 제작에 필요한 필드를 표로 뽑아주고
 - 표는 화면에서 직접 수정 가능하며, 엑셀로 다운로드할 수 있습니다.
 
 """
 import io
+import os
 import re
 import subprocess
 import tempfile
@@ -25,10 +26,11 @@ st.write("")
 
 st.markdown(
     """
-    1. **인증 제품 관리 목록 엑셀**을 업로드
-    2. **시험결과요약서 PDF**를 업로드 (표지에 있는 **인증번호**를 기준으로 인증 제품 관리 목록과 매칭됨)
-    3. 인터넷전화(MMoIP) 인증 건은 **인증심의위원회 회의록(.hwp)** 도 업로드 (인증범위 및 제조국가를 회의록에서 가져옴)
+    1. **시험결과요약서 PDF**를 업로드 (여러 개 가능, 표지에서 자동으로 필드를 추출)
+    2. 인터넷전화(MMoIP) 인증 건은 **인증심의위원회 회의록(.hwp)** 도 업로드 (인증범위 및 제조국가를 회의록에서 가져옴)
+    3. **업체명 영문명 매핑 엑셀**을 업로드하면 거기 있는 업체는 자동으로 채워지고, 없으면 구글 검색 링크로 직접 확인
     4. 인증 정보 추출 결과 표를 화면에서 확인 및 수정한 뒤 엑셀로 다운로드
+    5. 새로 채운 영문명이 있으면 화면 아래에서 **업데이트된 매핑 엑셀을 다운로드**해서 보관해뒀다가, 다음번에 ③번에 다시 업로드
     """
 )
 
@@ -51,48 +53,26 @@ with top_right:
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    mgmt_file = st.file_uploader(
-        "① 인증 제품 관리 목록 (.xlsx, 선택)",
-        type=["xlsx"],
-        key=f"mgmt_{st.session_state.uploader_key}",
-    )
-with col2:
     summary_files = st.file_uploader(
-        "② 시험결과요약서 (.PDF, 여러 개) :red[*]",
+        "① 시험결과요약서 (.PDF, 여러 개) :red[*]",
         type=["pdf"],
         accept_multiple_files=True,
         key=f"summary_{st.session_state.uploader_key}",
     )
-with col3:
+with col2:
     minutes_file = st.file_uploader(
-        "③ 회의록 (.hwp, 선택)",
+        "② 회의록 (.hwp, 선택)",
         type=["hwp"],
         key=f"minutes_{st.session_state.uploader_key}",
     )
+with col3:
+    company_map_file = st.file_uploader(
+        "③ 업체명 영문명 매핑 (.xlsx, 선택)",
+        type=["xlsx"],
+        key=f"companymap_{st.session_state.uploader_key}",
+    )
 
-st.caption(":red[*] 표시된 항목은 필수 업로드입니다. (관리 목록은 업체명 영문·파생모델명 등을 보완해주는 선택 항목이며, 회의록은 MMoIP 인증범위 보완용 선택 항목입니다)")
-
-
-# ──────────────────────────────────────────────────────────────
-# 관리 목록 로드
-# ──────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner=False)
-def load_management_list(file_bytes):
-    xls = pd.ExcelFile(io.BytesIO(file_bytes))
-    frames = []
-    for sheet in xls.sheet_names:
-        # 이 관리목록 양식은 1행이 시트 제목, 2행이 실제 컬럼 헤더인 구조
-        df = xls.parse(sheet, header=1)
-        # 혹시 헤더 행에 '인증번호' 컬럼이 없으면(양식이 다르면) header=0으로 재시도
-        if "인증번호" not in df.columns:
-            df = xls.parse(sheet, header=0)
-        df["__시트"] = sheet
-        frames.append(df)
-    all_df = pd.concat(frames, ignore_index=True, sort=False)
-    # 인증번호 공백/개행 정리
-    if "인증번호" in all_df.columns:
-        all_df["인증번호"] = all_df["인증번호"].astype(str).str.strip()
-    return all_df
+st.caption(":red[*] 표시된 항목은 필수 업로드입니다. (회의록·매핑 엑셀은 선택 항목입니다)")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -149,15 +129,18 @@ def extract_test_highlights_from_page(page, x_split=195, y_tol=3.0):
     if cur_words:
         lines.append((cur_top, cur_words))
 
+    GAP_LIMIT = 25  # 이 값보다 줄 간격이 크게 벌어지면 하이라이트 박스를 벗어난 것으로 간주
     started = False
     out_lines = []
-    for _, lw in lines:
+    prev_top = None
+    for top, lw in lines:
         lw_sorted = sorted(lw, key=lambda w: w["x0"])
         text = " ".join(w["text"] for w in lw_sorted).strip()
         compact = re.sub(r"\s+", "", text)
         if not started:
             if "TestHighlights" in compact.replace(":", ""):
                 started = True
+                prev_top = top
                 # 제목과 같은 줄에 내용이 더 있는 경우가 있는데, 그게 실제 불릿 항목일 때만 포함
                 # (제목 뒤에 모델명만 덧붙는 경우 — 예: "Test Highlights: CUVIA" — 는 제외)
                 m = re.search(r"Highlights\s*:?\s*(.*)", text)
@@ -169,14 +152,13 @@ def extract_test_highlights_from_page(page, x_split=195, y_tol=3.0):
         # '개요'/'시험환경' 등 다음 섹션 헤딩이 다른 단어와 같은 줄로 묶인 경우까지 감지
         if re.match(r"^(개\s*요|시험\s*목적|시험\s*환경|시험\s*방법|시험\s*절차|시험\s*결과)\b", text):
             break
+        # 이미 한 줄 이상 담은 뒤, 줄 간격이 갑자기 크게 벌어지면(=하이라이트 박스를 벗어나
+        # 옆 칸의 다른 문단으로 넘어간 것) 그 줄부터는 버린다. 박스 제목→첫 줄 사이의
+        # 첫 간격은 원래도 넓은 경우가 많아 이 검사에서 제외한다.
+        if out_lines and (top - prev_top) > GAP_LIMIT:
+            break
         out_lines.append(text)
-
-    # 좌표 기준 줄 재구성 특성상, 하이라이트 박스 바로 아래 '개요' 본문 문장이 뒤섞여
-    # 하이라이트 마지막 줄보다 위쪽(작은 top)으로 잘못 정렬되는 경우가 있음.
-    # 실제 하이라이트 항목은 항상 불릿(-, •, l 등)으로 시작하므로, 끝에서부터
-    # 불릿 없이 온전한 문장으로 끝나는('~다.') 줄은 '개요' 본문으로 간주하고 제거.
-    while out_lines and not re.match(r"^[•ŸlL▪∎⚫\-]", out_lines[-1]) and re.search(r"[가-힣]다\.\s*$", out_lines[-1]):
-        out_lines.pop()
+        prev_top = top
 
     return "\n".join(l for l in out_lines if l)
 
@@ -497,17 +479,62 @@ def autosize_worksheet(ws, df, max_width=60, min_width=8, char_px=0.95, row_heig
 # 메인 처리
 # ──────────────────────────────────────────────────────────────
 # ──────────────────────────────────────────────────────────────
+# 업체명 영문명 매핑 저장소
+# - ③번에서 매핑 엑셀(.xlsx)을 업로드하면 그걸 사용
+# - 업로드 안 하면 앱에 기본으로 들어있는 company_english_names.xlsx를 사용
+# - 컬럼: 업체명_국문 / 업체명_영문 (2개 컬럼짜리 단순한 표)
+# ──────────────────────────────────────────────────────────────
+COMPANY_MAP_PATH = os.path.join(os.path.dirname(__file__), "company_english_names.xlsx")
+CORP_DESIGNATOR_RE = re.compile(r"(주식회사|유한회사|유한책임회사|㈜|\(주\)|\(유\))")
+
+
+def normalize_corp_name(name):
+    """'㈜아이디엠테크놀러지', '주식회사 엑스게이트', '에이엠(주)' 등을 비교 가능한 형태로 정규화."""
+    if not name:
+        return ""
+    n = CORP_DESIGNATOR_RE.sub("", str(name))
+    return re.sub(r"\s+", "", n).strip()
+
+
+def _company_map_from_df(df):
+    m = {}
+    if "업체명_국문" in df.columns and "업체명_영문" in df.columns:
+        for _, r in df.iterrows():
+            kr, en = r.get("업체명_국문"), r.get("업체명_영문")
+            if pd.notna(kr) and pd.notna(en) and str(en).strip():
+                m[str(kr).strip()] = str(en).strip()
+    return m
+
+
+def load_company_map(uploaded_file=None):
+    if uploaded_file is not None:
+        try:
+            return _company_map_from_df(pd.read_excel(uploaded_file))
+        except Exception as e:
+            st.warning(f"업로드한 매핑 엑셀을 읽지 못했어요. 컬럼명이 '업체명_국문' / '업체명_영문'인지 확인해 주세요. ({e})")
+    if os.path.exists(COMPANY_MAP_PATH):
+        try:
+            return _company_map_from_df(pd.read_excel(COMPANY_MAP_PATH))
+        except Exception:
+            return {}
+    return {}
+
+
+def get_english_name_from_map(company_map, company_kr):
+    key = normalize_corp_name(company_kr)
+    for raw_name, eng in company_map.items():
+        if normalize_corp_name(raw_name) == key:
+            return eng
+    return None
+
+
+# ──────────────────────────────────────────────────────────────
 # 메인 처리
-# 관리 목록(xlsx)은 없어도 동작합니다 — 있으면 업체명(영문)/제품명/모델명/인증기준을
-# 더 정확하게 보완해주고, 없으면 시험결과요약서에서 추출한 값만으로 채웁니다.
+# 시험결과요약서에서 추출한 값으로 채우고, 업체명 영문명은 company_english_names.json
+# 매핑 파일에 있으면 그걸로 보완합니다 (없으면 화면에서 검색 링크로 확인 후 직접 입력).
 # ──────────────────────────────────────────────────────────────
 if summary_files:
-    if mgmt_file:
-        mgmt_df = load_management_list(mgmt_file.getvalue())
-    else:
-        mgmt_df = pd.DataFrame(columns=["인증번호"])
-        st.info("관리 목록을 업로드하지 않아 시험결과요약서에서 추출한 값만으로 채웁니다. "
-                "업체명(영문)이나 파생모델명처럼 요약서에 없는 정보는 비어 있을 수 있어요.")
+    company_map = load_company_map(company_map_file)
 
     with st.expander("회의록 표 미리보기 (MMoIP 인증범위 참고용)"):
         minutes_df = pd.DataFrame()
@@ -522,22 +549,16 @@ if summary_files:
         extracted = extract_summary_fields(f.getvalue(), f.name)
         cert_no = extracted.get("인증번호")
 
-        mgmt_row = None
-        if cert_no and "인증번호" in mgmt_df.columns:
-            match = mgmt_df[mgmt_df["인증번호"] == cert_no]
-            if not match.empty:
-                mgmt_row = match.iloc[0]
-
-        업체명_국문 = mgmt_row["업체명"] if mgmt_row is not None and "업체명" in mgmt_row else extracted.get("업체명(추출)")
-        업체명_영문 = mgmt_row["영문명"] if mgmt_row is not None and "영문명" in mgmt_row else ""
-        제품명 = mgmt_row["제품명"] if mgmt_row is not None and "제품명" in mgmt_row else extracted.get("제품명(추출)") or ""
-        모델명 = mgmt_row["모델명"] if mgmt_row is not None and "모델명" in mgmt_row else extracted.get("모델명(추출)") or ""
-        파생모델명 = mgmt_row["파생모델명"] if mgmt_row is not None and "파생모델명" in mgmt_row else extracted.get("파생모델명(추출)") or ""
-        if pd.notna(파생모델명) and str(파생모델명).strip():
+        업체명_국문 = extracted.get("업체명(추출)")
+        업체명_영문 = get_english_name_from_map(company_map, 업체명_국문) or ""
+        제품명 = extracted.get("제품명(추출)") or ""
+        모델명 = extracted.get("모델명(추출)") or ""
+        파생모델명 = extracted.get("파생모델명(추출)") or ""
+        if 파생모델명:
             모델명_전체 = f"{모델명}\n(파생모델명: {파생모델명})"
         else:
             모델명_전체 = 모델명
-        인증기준 = mgmt_row["인증기준"] if mgmt_row is not None and "인증기준" in mgmt_row else extracted.get("인증기준(추출)")
+        인증기준 = extracted.get("인증기준(추출)")
 
         # 회의록에서 이 건에 해당하는 행 미리 찾아두기 (인증범위 + 제조국 둘 다 참고)
         minutes_scope, minutes_country = None, None
@@ -581,6 +602,7 @@ if summary_files:
                 "시험번호": extracted.get("시험번호"),
                 "업체명_국문": 업체명_국문,
                 "업체명_영문": 업체명_영문,
+                "영문명_출처": "매핑파일" if 업체명_영문 else "",
                 "제품명": 제품명,
                 "모델명": 모델명_전체,
                 "제조자및제조국가_국문": 제조자국가_국문,
@@ -648,6 +670,36 @@ if summary_files:
         file_name="인증서_발급용_데이터.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+    # 업체명 영문명 매핑 업데이트: 이번에 화면에서 채운 영문명을 기존 매핑에 합쳐서 저장.
+    # GitHub이 설정돼 있으면 버튼 한 번으로 저장소에 바로 커밋되고(Streamlit Cloud가 자동 재배포),
+    # 아니면 JSON 파일로 받아서 레포의 company_english_names.json을 교체하는 방식입니다.
+    st.divider()
+    st.subheader("📁 업체명 영문명 매핑 관리")
+    updated_map = dict(company_map)
+    for _, r in edited_df.iterrows():
+        kr, en = r.get("업체명_국문"), r.get("업체명_영문")
+        if kr and en and str(en).strip():
+            updated_map[str(kr).strip()] = str(en).strip()
+
+    new_entries = {k: v for k, v in updated_map.items() if company_map.get(k) != v}
+    if new_entries:
+        st.caption(f"이번에 새로 채워지거나 바뀐 업체명 {len(new_entries)}건이 있어요. "
+                   "아래에서 매핑 엑셀을 받아 저장해두셨다가, 다음번에 ③번에 다시 업로드하시면 자동으로 채워집니다.")
+        st.dataframe(pd.DataFrame(new_entries.items(), columns=["업체명_국문", "업체명_영문"]), use_container_width=True)
+    else:
+        st.caption("현재 매핑 기준으로 새로 추가/변경된 업체명은 없어요.")
+
+    map_buf = io.BytesIO()
+    pd.DataFrame(sorted(updated_map.items()), columns=["업체명_국문", "업체명_영문"]).to_excel(
+        map_buf, index=False, sheet_name="업체명매핑"
+    )
+    st.download_button(
+        "💾 업데이트된 매핑 엑셀 다운로드 (company_english_names.xlsx)",
+        data=map_buf.getvalue(),
+        file_name="company_english_names.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 else:
     st.write("")
-    st.info("② 시험결과요약서를 업로드하면 인증정보가 표시됩니다. (① 관리 목록은 선택 항목입니다)")
+    st.info("① 시험결과요약서를 업로드하면 인증정보가 표시됩니다.")
